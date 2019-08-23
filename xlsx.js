@@ -7810,21 +7810,51 @@ return function parse_ws_xml_data(sdata, s, opts, guess) {
 	}
 }; })();
 
-function write_ws_xml_data(ws, opts, idx, wb) {
-	var o = [], r = [], range = safe_decode_range(ws['!ref']), cell, ref, rr = "", cols = [], R, C;
-	for(C = range.s.c; C <= range.e.c; ++C) cols[C] = encode_col(C);
-	for(R = range.s.r; R <= range.e.r; ++R) {
-		r = [];
-		rr = encode_row(R);
-		for(C = range.s.c; C <= range.e.c; ++C) {
-			ref = cols[C] + rr;
-			if(ws[ref] === undefined) continue;
-			if((cell = write_ws_xml_cell(ws[ref], ref, ws, opts, idx, wb)) != null) r.push(cell);
-		}
-		if(r.length > 0) o[o.length] = (writextag('row', r.join(""), {r:rr}));
-	}
-	return o.join("");
-}
+var DEF_PPI = 96, PPI = DEF_PPI;
+  function px2pt(px) { return px * 96 / PPI; }
+  function write_ws_xml_data(ws, opts, idx, wb) {
+    var o = [], r = [], range = safe_decode_range(ws['!ref']), cell="", ref, rr = "", cols = [], R=0, C=0, rows = ws['!rows'];
+    var dense = Array.isArray(ws);
+    var params = ({r:rr}), row, height = -1;
+    for(C = range.s.c; C <= range.e.c; ++C) cols[C] = encode_col(C);
+    for(R = range.s.r; R <= range.e.r; ++R) {
+      r = [];
+      rr = encode_row(R);
+      for(C = range.s.c; C <= range.e.c; ++C) {
+        ref = cols[C] + rr;
+        var _cell = dense ? (ws[R]||[])[C]: ws[ref];
+        if(_cell === undefined) continue;
+        if((cell = write_ws_xml_cell(_cell, ref, ws, opts, idx, wb)) != null) r.push(cell);
+      }
+      if(r.length > 0 || (rows && rows[R])) {
+        params = ({r:rr});
+        if(rows && rows[R]) {
+          row = rows[R];
+          if(row.hidden) params.hidden = 1;
+          height = -1;
+          if(row.hpx) height = px2pt(row.hpx);
+          else if(row.hpt) height = row.hpt;
+          if(height > -1) { params.ht = height; params.customHeight = 1; }
+          if(row.level) { params.outlineLevel = row.level; }
+        }
+        o[o.length] = (writextag('row', r.join(""), params));
+      }
+    }
+    if(rows) for(; R < rows.length; ++R) {
+      if(rows && rows[R]) {
+        params = ({r:R+1});
+        row = rows[R];
+        if(row.hidden) params.hidden = 1;
+        height = -1;
+        if (row.hpx) height = px2pt(row.hpx);
+        else if (row.hpt) height = row.hpt;
+        if (height > -1) { params.ht = height; params.customHeight = 1; }
+        if (row.level) { params.outlineLevel = row.level; }
+        o[o.length] = (writextag('row', "", params));
+      }
+    }
+    return o.join("");
+  }
 
 var WS_XML_ROOT = writextag('worksheet', null, {
 	'xmlns': XMLNS.main[0],
@@ -12001,7 +12031,11 @@ var utils = {
 	sheet_to_csv: sheet_to_csv,
 	sheet_to_json: sheet_to_json,
 	sheet_to_formulae: sheet_to_formulae,
-	sheet_to_row_object_array: sheet_to_row_object_array
+	sheet_to_row_object_array: sheet_to_row_object_array,
+	aoa_to_sheet:aoa_to_sheet,
+  	sheet_add_aoa:sheet_add_aoa,
+  	json_to_sheet:json_to_sheet,
+  	sheet_add_json:sheet_add_json
 };
 
 
@@ -12472,6 +12506,118 @@ var XmlNode = (function () {
     }.initialize(options||{});
   }
 
+function sheet_add_json(_ws, js, opts) {
+    var o = opts || {};
+    var offset = +!o.skipHeader;
+    var ws = _ws || ({});
+    var _R = 0, _C = 0;
+    if(ws && o.origin != null) {
+      if(typeof o.origin == 'number') _R = o.origin;
+      else {
+        var _origin = typeof o.origin == "string" ? decode_cell(o.origin) : o.origin;
+        _R = _origin.r; _C = _origin.c;
+      }
+    }
+    var cell;
+    var range = ({s: {c:0, r:0}, e: {c:_C, r:_R + js.length - 1 + offset}});
+    if(ws['!ref']) {
+      var _range = safe_decode_range(ws['!ref']);
+      range.e.c = Math.max(range.e.c, _range.e.c);
+      range.e.r = Math.max(range.e.r, _range.e.r);
+      if(_R == -1) { _R = range.e.r + 1; range.e.r = _R + js.length - 1 + offset; }
+    }
+    var hdr = o.header || [], C = 0;
+
+    js.forEach(function (JS, R) {
+      keys(JS).forEach(function(k) {
+        if((C=hdr.indexOf(k)) == -1) hdr[C=hdr.length] = k;
+        var v = JS[k];
+        var t = 'z';
+        var z = "";
+        if(v && typeof v === 'object' && !(v instanceof Date)){
+          ws[encode_cell({c:_C + C,r:_R + R + offset})] = v;
+        } else {
+          if(typeof v == 'number') t = 'n';
+          else if(typeof v == 'boolean') t = 'b';
+          else if(typeof v == 'string') t = 's';
+          else if(v instanceof Date) {
+            t = 'd';
+            if(!o.cellDates) { t = 'n'; v = datenum(v); }
+            z = o.dateNF || SSF._table[14];
+          }
+          ws[encode_cell({c:_C + C,r:_R + R + offset})] = cell = ({t:t, v:v});
+          if(z) cell.z = z;
+        }
+      });
+    });
+    range.e.c = Math.max(range.e.c, _C + hdr.length - 1);
+    var __R = encode_row(_R);
+    if(offset) for(C = 0; C < hdr.length; ++C) ws[encode_col(C + _C) + __R] = {t:'s', v:hdr[C]};
+    ws['!ref'] = encode_range(range);
+    return ws;
+  }
+  function json_to_sheet(js, opts) { return sheet_add_json(null, js, opts); }
+
+  var DENSE = null;
+  function sheet_add_aoa(_ws, data, opts) {
+    var o = opts || {};
+    var dense = _ws ? Array.isArray(_ws) : o.dense;
+    if(DENSE != null && dense == null) dense = DENSE;
+    var ws = _ws || (dense ? ([]) : ({}));
+    var _R = 0, _C = 0;
+    if(ws && o.origin != null) {
+      if(typeof o.origin == 'number') _R = o.origin;
+      else {
+        var _origin = typeof o.origin == "string" ? decode_cell(o.origin) : o.origin;
+        _R = _origin.r; _C = _origin.c;
+      }
+    }
+    var range = ({s: {c:10000000, r:10000000}, e: {c:0, r:0}});
+    if(ws['!ref']) {
+      var _range = safe_decode_range(ws['!ref']);
+      range.s.c = _range.s.c;
+      range.s.r = _range.s.r;
+      range.e.c = Math.max(range.e.c, _range.e.c);
+      range.e.r = Math.max(range.e.r, _range.e.r);
+      if(_R == -1) range.e.r = _R = _range.e.r + 1;
+    }
+    for(var R = 0; R != data.length; ++R) {
+      if(!data[R]) continue;
+      if(!Array.isArray(data[R])) throw new Error("aoa_to_sheet expects an array of arrays");
+      for(var C = 0; C != data[R].length; ++C) {
+        if(typeof data[R][C] === 'undefined') continue;
+        var cell = ({v: data[R][C] });
+        var __R = _R + R, __C = _C + C;
+        if(range.s.r > __R) range.s.r = __R;
+        if(range.s.c > __C) range.s.c = __C;
+        if(range.e.r < __R) range.e.r = __R;
+        if(range.e.c < __C) range.e.c = __C;
+        if(data[R][C] && typeof data[R][C] === 'object' && !Array.isArray(data[R][C]) && !(data[R][C] instanceof Date)) cell = data[R][C];
+        else {
+          if(Array.isArray(cell.v)) { cell.f = data[R][C][1]; cell.v = cell.v[0]; }
+          if(cell.v === null) { if(cell.f) cell.t = 'n'; else if(!o.sheetStubs) continue; else cell.t = 'z'; }
+          else if(typeof cell.v === 'number') cell.t = 'n';
+          else if(typeof cell.v === 'boolean') cell.t = 'b';
+          else if(cell.v instanceof Date) {
+            cell.z = o.dateNF || SSF._table[14];
+            if(o.cellDates) { cell.t = 'd'; cell.w = SSF.format(cell.z, datenum(cell.v)); }
+            else { cell.t = 'n'; cell.v = datenum(cell.v); cell.w = SSF.format(cell.z, cell.v); }
+          }
+          else cell.t = 's';
+        }
+        if(dense) {
+          if(!ws[__R]) ws[__R] = [];
+          ws[__R][__C] = cell;
+        } else {
+          var cell_ref = encode_cell(({c:__C,r:__R}));
+          ws[cell_ref] = cell;
+        }
+      }
+    }
+    if(range.s.c < 10000000) ws['!ref'] = encode_range(range);
+    return ws;
+  }
+  function aoa_to_sheet(data, opts) { return sheet_add_aoa(null, data, opts); }
 
 XLSX.parse_xlscfb = parse_xlscfb;
 XLSX.parse_zip = parse_zip;
